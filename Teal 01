@@ -1,0 +1,309 @@
+extends CharacterBody2D
+ 
+# ==============================================================================
+#  PLAYER CONTROLLER — Teal
+#  Features: Walk / Run · Jump · Ghost Toggle (with vertical float)
+#            Possess (Z) · Pause toggle · Smooth acceleration
+# ==============================================================================
+ 
+ 
+# ── MOVEMENT CONSTANTS ────────────────────────────────────────────────────────
+const WALK_SPEED    := 150.0   # px/s
+const RUN_SPEED     := 300.0   # px/s
+const JUMP_VELOCITY := -400.0  # upward impulse
+const GRAVITY       := 980.0   # px/s²
+ 
+## Fraction of target speed applied per physics frame as accel/decel.
+## Higher values = snappier; lower = more floaty/smooth.
+const ACCEL         := 0.18    # ground & ghost acceleration
+const DECEL         := 0.22    # ground & ghost deceleration
+const AIR_CONTROL   := 0.08    # reduced horizontal control in the air
+ 
+const FLOAT_SPEED   := 160.0   # vertical speed while ghost-floating
+ 
+ 
+# ── ABILITY FLAGS ─────────────────────────────────────────────────────────────
+var is_ghost     := false
+var can_ghost    := false
+var is_possessed := false
+ 
+ 
+# ── TRACKING ARRAYS ───────────────────────────────────────────────────────────
+var _fragments_in_range:   Array[Node] = []
+var _possessable_in_range: Array[Node] = []
+var _possessed_target: Node = null
+ 
+ 
+# ── CHILD-NODE REFERENCES ─────────────────────────────────────────────────────
+@onready var visual:        ColorRect    = $Visual
+@onready var interact_area: Area2D       = $InteractArea
+# Optional — add a ShapeCast2D child named "GhostShapeCast" on Layer 2
+# to prevent Teal from de-phasing while still inside a ghost wall.
+@onready var ghost_shape_cast: ShapeCast2D = \
+		$GhostShapeCast if has_node("GhostShapeCast") else null
+ 
+ 
+# ── INTERNALS ─────────────────────────────────────────────────────────────────
+var _tween: Tween   # reused for smooth alpha transitions
+ 
+ 
+# ==============================================================================
+#  LIFECYCLE
+# ==============================================================================
+ 
+func _ready() -> void:
+	add_to_group("player")
+	assert(visual        != null, "Player: $Visual (ColorRect) node is missing.")
+	assert(interact_area != null, "Player: $InteractArea (Area2D) node is missing.")
+ 
+ 
+# ==============================================================================
+#  PHYSICS LOOP
+# ==============================================================================
+ 
+func _physics_process(delta: float) -> void:
+	# Teal's own body is fully frozen while she is possessing another entity.
+	if is_possessed:
+		return
+ 
+	if is_ghost:
+		_process_ghost(delta)
+	else:
+		_process_normal(delta)
+ 
+	move_and_slide()
+ 
+ 
+# ── NORMAL MODE ───────────────────────────────────────────────────────────────
+ 
+func _process_normal(delta: float) -> void:
+	# Gravity
+	if not is_on_floor():
+		velocity.y += GRAVITY * delta
+ 
+	_handle_jump()
+ 
+	var h_accel := ACCEL if is_on_floor() else AIR_CONTROL
+	_handle_horizontal(h_accel)
+ 
+ 
+func _handle_jump() -> void:
+	if Input.is_action_just_pressed("jump") and is_on_floor():
+		velocity.y = JUMP_VELOCITY
+		GameManager.complete_tutorial_step("jump")
+ 
+ 
+func _handle_horizontal(blend: float) -> void:
+	var running      := Input.is_action_pressed("run")
+	var target_speed := RUN_SPEED if running else WALK_SPEED
+	var dir          := Input.get_axis("move_left", "move_right")
+ 
+	if dir != 0.0:
+		# Lerp toward target — smooth acceleration, no instant starts
+		velocity.x = lerp(velocity.x, dir * target_speed, blend)
+		visual.scale.x = sign(dir)   # flip sprite to face direction
+		GameManager.complete_tutorial_step("move")
+		if running:
+			GameManager.complete_tutorial_step("run")
+	else:
+		# Lerp back to zero — smooth stop, no instant braking
+		velocity.x = lerp(velocity.x, 0.0, DECEL)
+ 
+ 
+# ── GHOST MODE (no gravity, free vertical float) ──────────────────────────────
+ 
+func _process_ghost(_delta: float) -> void:
+	_handle_horizontal(ACCEL)
+ 
+	# "ghost_up" / "ghost_down" — add both to Input Map:
+	#   ghost_up  →  W  or  Up Arrow
+	#   ghost_down → S  or  Down Arrow
+	var v_dir := Input.get_axis("ghost_down", "ghost_up")
+ 
+	if v_dir != 0.0:
+		velocity.y = lerp(velocity.y, -v_dir * FLOAT_SPEED, ACCEL)
+	else:
+		velocity.y = lerp(velocity.y, 0.0, DECEL)
+ 
+ 
+# ==============================================================================
+#  INPUT  (discrete actions — kept out of the physics loop)
+# ==============================================================================
+ 
+func _unhandled_input(event: InputEvent) -> void:
+	# Ignore pure mouse movement — it has no action data
+	# Without this, moving the mouse throws an error every frame
+	if event is InputEventMouseMotion:
+		return
+
+	# ── Pause (works even while possessing) ──────────────────────
+	if event.is_action_just_pressed("ui_cancel"):
+		_toggle_pause()
+		return
+
+	# ── While possessing: only possess key releases ───────────────
+	if is_possessed:
+		if event.is_action_just_pressed("possess"):
+			_release_possess()
+		return
+
+	# ── Normal / ghost actions ────────────────────────────────────
+	if event.is_action_just_pressed("interact"):
+		_try_collect_fragment()
+
+	if event.is_action_just_pressed("ghost_toggle") and can_ghost:
+		_toggle_ghost()
+
+	if event.is_action_just_pressed("possess"):
+		_try_possess()
+ 
+ 
+# ==============================================================================
+#  PAUSE
+# ==============================================================================
+ 
+func _toggle_pause() -> void:
+	get_tree().paused = not get_tree().paused
+ 
+	# Show or hide the PauseMenu layer (autoloaded or parented to the root).
+	# The PauseMenu scene must have process_mode = PROCESS_MODE_ALWAYS so it
+	# keeps responding to input while the tree is paused.
+	var menu := get_tree().root.get_node_or_null("PauseMenu")
+	if menu:
+		menu.visible = get_tree().paused
+ 
+ 
+# ==============================================================================
+#  GHOST / PHASE ABILITY
+# ==============================================================================
+ 
+func _toggle_ghost() -> void:
+	if is_ghost:
+		_exit_ghost()
+	else:
+		_enter_ghost()
+ 
+ 
+func _enter_ghost() -> void:
+	is_ghost = true
+	set_collision_mask_value(2, false)   # pass through ghost walls (Layer 2)
+	_fade_alpha(0.45)
+	GameManager.complete_tutorial_step("ghost")
+ 
+ 
+func _exit_ghost() -> void:
+	# Safety: stay phased if still overlapping a ghost wall.
+	if ghost_shape_cast != null and ghost_shape_cast.is_colliding():
+		return
+ 
+	is_ghost = false
+	velocity.y = 0.0                     # cancel any upward/downward float
+	set_collision_mask_value(2, true)
+	_fade_alpha(1.0)
+ 
+ 
+func _fade_alpha(target: float) -> void:
+	if _tween:
+		_tween.kill()
+	_tween = create_tween().set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_SINE)
+	_tween.tween_property(visual, "modulate:a", target, 0.25)
+ 
+ 
+## Call from a trigger / cutscene / pickup to grant the ghost ability.
+func unlock_ghost() -> void:
+	can_ghost = true
+	# e.g. GameManager.notify_ability_unlocked("ghost")
+ 
+ 
+# ==============================================================================
+#  POSSESS MECHANIC  (Z key)
+# ==============================================================================
+#
+#  Any possessable entity needs two methods:
+#    func on_possessed(player: Node) -> void   ← called when Teal enters
+#    func on_released()              -> void   ← called when Z is pressed again
+#
+#  And it should call player.register_possessable(self) / unregister_possessable(self)
+#  from its own Area2D body_entered / body_exited signals.
+ 
+func _try_possess() -> void:
+	_possessable_in_range = _possessable_in_range.filter(
+			func(n): return is_instance_valid(n))
+ 
+	if _possessable_in_range.is_empty():
+		return
+ 
+	var target: Node = _possessable_in_range[0]
+	if not target.has_method("on_possessed"):
+		push_warning("Possessable target is missing on_possessed() method: " + target.name)
+		return
+ 
+	_possessed_target = target
+	is_possessed      = true
+ 
+	velocity    = Vector2.ZERO
+	visible     = false
+	set_physics_process(false)   # freeze Teal; the target handles its own movement
+ 
+	target.on_possessed(self)
+	GameManager.complete_tutorial_step("possess")
+ 
+ 
+func _release_possess() -> void:
+	if is_instance_valid(_possessed_target):
+		# Snap Teal back to where the possessed body is now.
+		global_position = _possessed_target.global_position
+ 
+		if _possessed_target.has_method("on_released"):
+			_possessed_target.on_released()
+ 
+	_possessed_target = null
+	is_possessed      = false
+ 
+	visible = true
+	set_physics_process(true)
+	velocity = Vector2.ZERO
+ 
+ 
+# ── Called by possessable entities ───────────────────────────────────────────
+ 
+func register_possessable(node: Node) -> void:
+	if not _possessable_in_range.has(node):
+		_possessable_in_range.append(node)
+ 
+func unregister_possessable(node: Node) -> void:
+	_possessable_in_range.erase(node)
+ 
+ 
+# ==============================================================================
+#  FRAGMENT INTERACTION
+# ==============================================================================
+ 
+func _try_collect_fragment() -> void:
+	_fragments_in_range = _fragments_in_range.filter(
+			func(f): return is_instance_valid(f))
+	if _fragments_in_range.is_empty():
+		return
+	_fragments_in_range[0].collect()
+ 
+ 
+func set_fragment_in_range(fragment: Node) -> void:
+	if not _fragments_in_range.has(fragment):
+		_fragments_in_range.append(fragment)
+ 
+func clear_fragment_in_range(fragment: Node) -> void:
+	_fragments_in_range.erase(fragment)
+ 
+# ==============================================================================
+#  FREEZE / UNFREEZE  (called by level1.gd during cutscenes)
+# ==============================================================================
+
+func freeze() -> void:
+	set_physics_process(false)
+	set_process_unhandled_input(false)
+	velocity = Vector2.ZERO
+
+func unfreeze() -> void:
+	set_physics_process(true)
+	set_process_unhandled_input(true)
+	
