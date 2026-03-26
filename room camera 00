@@ -1,0 +1,52 @@
+extends Camera2D
+
+# ==============================================================================
+#  ROOM CAMERA — fixed angle, slides between rooms on zone complete
+#  Each room is ROOM_WIDTH pixels wide. Camera centers on the active room.
+# ==============================================================================
+
+const ROOM_WIDTH  : float = 1152.0   # must match your viewport width
+const SLIDE_SPEED : float = 3.5      # how fast the camera slides
+const SNAP_THRESHOLD : float = 0.5   # snaps when this close to target
+
+signal slide_finished
+
+var _target_x  : float = 0.0
+var _is_sliding: bool  = false
+var _current_room: int = 0
+
+func _ready() -> void:
+	enabled                     = true
+	position_smoothing_enabled  = false   # we handle smoothing manually
+	position.x                  = 0.0
+	position.y                  = 0.0
+
+func _process(delta: float) -> void:
+	if not _is_sliding:
+		return
+
+	position.x = lerp(position.x, _target_x, SLIDE_SPEED * delta)
+
+	if abs(position.x - _target_x) < SNAP_THRESHOLD:
+		position.x  = _target_x
+		_is_sliding = false
+		slide_finished.emit()
+
+# Call this from level1.gd when a tutorial step completes
+func go_to_room(room_index: int) -> void:
+	if room_index == _current_room:
+		return
+	_current_room = room_index
+	_target_x = room_index * ROOM_WIDTH + ROOM_WIDTH / 2.0
+	_is_sliding   = true
+
+# Returns true while the camera is between rooms
+func is_transitioning() -> bool:
+	return _is_sliding
+
+# Instantly snap with no slide — used at scene start
+func snap_to_room(room_index: int) -> void:
+	_current_room = room_index
+	_target_x = room_index * ROOM_WIDTH + ROOM_WIDTH / 2.0
+	position.x    = _target_x
+	_is_sliding   = false
