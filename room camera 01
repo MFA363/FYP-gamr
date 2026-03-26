@@ -1,0 +1,69 @@
+extends Camera2D
+
+# ==============================================================================
+#  ROOM CAMERA
+#  Fixed angle — never rotates, never tilts.
+#  Slides horizontally between rooms when a tutorial step completes.
+#  Stays completely still within each room.
+# ==============================================================================
+
+const ROOM_WIDTH     : float = 1152.0
+const ROOM_HEIGHT    : float = 648.0
+const SLIDE_SPEED    : float = 3.5
+const SNAP_THRESHOLD : float = 0.5
+
+signal slide_finished
+
+var _target_x    : float = 0.0
+var _is_sliding  : bool  = false
+var _current_room: int   = 0
+
+func _ready() -> void:
+	enabled                    = true
+	# Never rotate — angle is always fixed flat
+	rotation                   = 0.0
+	position_smoothing_enabled = false
+	# Snap to center of Room 0 immediately
+	position.x = _room_center_x(0)
+	position.y = ROOM_HEIGHT / 2.0
+	_target_x  = position.x
+
+func _process(delta: float) -> void:
+	if not _is_sliding:
+		return
+
+	position.x = lerp(position.x, _target_x, SLIDE_SPEED * delta)
+
+	# Snap when close enough — prevents endless micro-drift
+	if abs(position.x - _target_x) < SNAP_THRESHOLD:
+		position.x  = _target_x
+		_is_sliding = false
+		slide_finished.emit()
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+## Slide smoothly to a room. Called by level1.gd on step complete.
+func go_to_room(room_index: int) -> void:
+	if room_index == _current_room:
+		return
+	_current_room = room_index
+	_target_x     = _room_center_x(room_index)
+	_is_sliding   = true
+
+## Instantly snap with no slide — used at scene start.
+func snap_to_room(room_index: int) -> void:
+	_current_room = room_index
+	_target_x     = _room_center_x(room_index)
+	position.x    = _target_x
+	_is_sliding   = false
+
+## Returns true while camera is moving between rooms.
+func is_transitioning() -> bool:
+	return _is_sliding
+
+# ── Private ───────────────────────────────────────────────────────────────────
+
+## Camera center X for a given room index.
+## Room 0 center = 576, Room 1 center = 1728, Room 2 center = 2880, etc.
+func _room_center_x(room_index: int) -> float:
+	return room_index * ROOM_WIDTH + ROOM_WIDTH / 2.0
