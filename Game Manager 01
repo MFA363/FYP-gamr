@@ -1,0 +1,31 @@
+extends Node
+
+signal fragment_collected(fragment_id: String, tip_title: String, tip_body: String)
+
+var fragments_collected:     Array[String] = []
+var tutorial_steps_complete: Array[String] = []
+
+func _ready() -> void:
+	# Always start completely fresh — clears any data left from previous run
+	fragments_collected     = []
+	tutorial_steps_complete = []
+
+func add_fragment(id: String, title: String, body: String) -> void:
+	if id not in fragments_collected:
+		fragments_collected.append(id)
+		fragment_collected.emit(id, title, body)
+
+func complete_tutorial_step(step: String) -> void:
+	if step not in tutorial_steps_complete:
+		tutorial_steps_complete.append(step)
+
+func is_step_complete(step: String) -> bool:
+	return step in tutorial_steps_complete
+
+func load_level(level_num: int) -> void:
+	get_tree().change_scene_to_file(
+		"res://scenes/Levels/Level" + str(level_num) + ".tscn"
+	)
+
+func restart_level() -> void:
+	get_tree().reload_current_scene()
