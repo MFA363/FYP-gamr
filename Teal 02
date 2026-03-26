@@ -1,0 +1,256 @@
+extends CharacterBody2D
+
+# ==============================================================================
+#  PLAYER CONTROLLER — Teal
+#  Walk · Run · Jump · Ghost mode · Possess · Pause
+# ==============================================================================
+
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+const WALK_SPEED     := 150.0
+const RUN_SPEED      := 300.0
+const JUMP_VELOCITY  := -400.0
+const GRAVITY        := 980.0
+const ACCEL          := 0.18
+const DECEL          := 0.22
+const AIR_CONTROL    := 0.08
+const FLOAT_SPEED    := 160.0
+const STOP_THRESHOLD := 1.0   # velocity below this snaps to zero
+
+# ── STATE FLAGS ───────────────────────────────────────────────────────────────
+var is_ghost     := false
+var can_ghost    := false
+var is_possessed := false
+
+# ── TRACKING ──────────────────────────────────────────────────────────────────
+var _fragments_in_range:   Array[Node] = []
+var _possessable_in_range: Array[Node] = []
+var _possessed_target: Node            = null
+var _tween: Tween
+
+# ── NODE REFS ─────────────────────────────────────────────────────────────────
+@onready var visual:           ColorRect  = $Visual
+@onready var interact_area:    Area2D     = $InteractArea
+@onready var ghost_shape_cast: ShapeCast2D = \
+		$GhostShapeCast if has_node("GhostShapeCast") else null
+
+# ==============================================================================
+#  LIFECYCLE
+# ==============================================================================
+
+func _ready() -> void:
+	add_to_group("player")
+	assert(visual        != null, "Teal: $Visual node missing.")
+	assert(interact_area != null, "Teal: $InteractArea node missing.")
+
+# ==============================================================================
+#  PHYSICS — runs every frame
+# ==============================================================================
+
+func _physics_process(delta: float) -> void:
+	if is_possessed:
+		return
+
+	if is_ghost:
+		_process_ghost()
+	else:
+		_process_normal(delta)
+
+	move_and_slide()
+
+# ── Normal movement ───────────────────────────────────────────────────────────
+
+func _process_normal(delta: float) -> void:
+	if not is_on_floor():
+		velocity.y += GRAVITY * delta
+	_handle_jump()
+	var blend := ACCEL if is_on_floor() else AIR_CONTROL
+	_handle_horizontal(blend)
+
+func _handle_jump() -> void:
+	# Input.is_action_just_pressed is correct here — this is the Input singleton
+	# not an InputEvent object, so this method exists and works correctly
+	if Input.is_action_just_pressed("jump") and is_on_floor():
+		velocity.y = JUMP_VELOCITY
+		GameManager.complete_tutorial_step("jump")
+
+func _handle_horizontal(blend: float) -> void:
+	var running      := Input.is_action_pressed("run")
+	var target_speed := RUN_SPEED if running else WALK_SPEED
+	var dir          := Input.get_axis("move_left", "move_right")
+
+	if dir != 0.0:
+		velocity.x = lerp(velocity.x, dir * target_speed, blend)
+		visual.scale.x = sign(dir)
+		GameManager.complete_tutorial_step("move")
+		if running:
+			GameManager.complete_tutorial_step("run")
+	else:
+		velocity.x = lerp(velocity.x, 0.0, DECEL)
+		# Snap to zero — prevents endless micro-drift at rest
+		if abs(velocity.x) < STOP_THRESHOLD:
+			velocity.x = 0.0
+
+# ── Ghost movement ────────────────────────────────────────────────────────────
+
+func _process_ghost() -> void:
+	_handle_horizontal(ACCEL)
+
+	var v_dir := Input.get_axis("ghost_down", "ghost_up")
+	if v_dir != 0.0:
+		velocity.y = lerp(velocity.y, -v_dir * FLOAT_SPEED, ACCEL)
+	else:
+		velocity.y = lerp(velocity.y, 0.0, DECEL)
+		if abs(velocity.y) < STOP_THRESHOLD:
+			velocity.y = 0.0
+
+# ==============================================================================
+#  INPUT — discrete actions only
+#
+#  IMPORTANT: Inside _unhandled_input, use event.is_action_pressed()
+#  NOT event.is_action_just_pressed() — that method does not exist
+#  on InputEvent objects in Godot 4. It only exists on the Input singleton.
+#  _unhandled_input fires once per keypress so behaviour is identical.
+# ==============================================================================
+
+func _unhandled_input(event: InputEvent) -> void:
+	# Mouse movement has no action data — always ignore it
+	if event is InputEventMouseMotion:
+		return
+
+	# Pause works at all times
+	if event.is_action_pressed("ui_cancel"):
+		_toggle_pause()
+		return
+
+	# While possessing — only release key matters
+	if is_possessed:
+		if event.is_action_pressed("possess"):
+			_release_possess()
+		return
+
+	# Normal and ghost shared actions
+	if event.is_action_pressed("interact"):
+		_try_collect_fragment()
+
+	if event.is_action_pressed("ghost_toggle") and can_ghost:
+		_toggle_ghost()
+
+	if event.is_action_pressed("possess"):
+		_try_possess()
+
+# ==============================================================================
+#  PAUSE
+# ==============================================================================
+
+func _toggle_pause() -> void:
+	get_tree().paused = not get_tree().paused
+	var menu := get_tree().root.get_node_or_null("PauseMenu")
+	if menu:
+		menu.visible = get_tree().paused
+
+# ==============================================================================
+#  GHOST ABILITY
+# ==============================================================================
+
+func _toggle_ghost() -> void:
+	if is_ghost:
+		_exit_ghost()
+	else:
+		_enter_ghost()
+
+func _enter_ghost() -> void:
+	is_ghost = true
+	set_collision_mask_value(2, false)
+	_fade_alpha(0.45)
+	GameManager.complete_tutorial_step("ghost")
+
+func _exit_ghost() -> void:
+	# Stay phased if still inside a ghost wall
+	if ghost_shape_cast != null and ghost_shape_cast.is_colliding():
+		return
+	is_ghost   = false
+	velocity.y = 0.0
+	set_collision_mask_value(2, true)
+	_fade_alpha(1.0)
+
+func _fade_alpha(target: float) -> void:
+	if _tween:
+		_tween.kill()
+	_tween = create_tween() \
+		.set_ease(Tween.EASE_OUT) \
+		.set_trans(Tween.TRANS_SINE)
+	_tween.tween_property(visual, "modulate:a", target, 0.25)
+
+func unlock_ghost() -> void:
+	can_ghost = true
+
+# ==============================================================================
+#  POSSESS MECHANIC
+# ==============================================================================
+
+func _try_possess() -> void:
+	_possessable_in_range = _possessable_in_range.filter(
+			func(n): return is_instance_valid(n))
+	if _possessable_in_range.is_empty():
+		return
+	var target: Node = _possessable_in_range[0]
+	if not target.has_method("on_possessed"):
+		push_warning("Possessable missing on_possessed(): " + target.name)
+		return
+	_possessed_target = target
+	is_possessed      = true
+	velocity          = Vector2.ZERO
+	visible           = false
+	set_physics_process(false)
+	target.on_possessed(self)
+	GameManager.complete_tutorial_step("possess")
+
+func _release_possess() -> void:
+	if is_instance_valid(_possessed_target):
+		global_position = _possessed_target.global_position
+		if _possessed_target.has_method("on_released"):
+			_possessed_target.on_released()
+	_possessed_target = null
+	is_possessed      = false
+	visible           = true
+	set_physics_process(true)
+	velocity          = Vector2.ZERO
+
+func register_possessable(node: Node) -> void:
+	if not _possessable_in_range.has(node):
+		_possessable_in_range.append(node)
+
+func unregister_possessable(node: Node) -> void:
+	_possessable_in_range.erase(node)
+
+# ==============================================================================
+#  FRAGMENT COLLECTION
+# ==============================================================================
+
+func _try_collect_fragment() -> void:
+	_fragments_in_range = _fragments_in_range.filter(
+			func(f): return is_instance_valid(f))
+	if _fragments_in_range.is_empty():
+		return
+	_fragments_in_range[0].collect()
+	GameManager.complete_tutorial_step("collect")
+
+func set_fragment_in_range(fragment: Node) -> void:
+	if not _fragments_in_range.has(fragment):
+		_fragments_in_range.append(fragment)
+
+func clear_fragment_in_range(fragment: Node) -> void:
+	_fragments_in_range.erase(fragment)
+
+# ==============================================================================
+#  FREEZE / UNFREEZE — called by level1.gd during NPC cutscene
+# ==============================================================================
+
+func freeze() -> void:
+	set_physics_process(false)
+	set_process_unhandled_input(false)
+	velocity = Vector2.ZERO
+
+func unfreeze() -> void:
+	set_physics_process(true)
+	set_process_unhandled_input(true)
