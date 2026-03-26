@@ -1,0 +1,39 @@
+extends Control
+
+@onready var prompt_panel: PanelContainer = $PromptPanel
+@onready var prompt_label: Label = $PromptPanel/MarginContainer/PromptLabel
+@onready var tip_panel: PanelContainer = $TipPanel
+@onready var tip_title: Label = $TipPanel/VBoxContainer/TipTitle
+@onready var tip_body: Label = $TipPanel/VBoxContainer/TipBody
+@onready var close_btn: Button = $TipPanel/VBoxContainer/CloseBtn
+@onready var complete_panel: PanelContainer = $CompletePanel
+
+func _ready() -> void:
+	# Panels start hidden — set here as backup in case editor state drifts
+	tip_panel.hide()
+	complete_panel.hide()
+	prompt_panel.show()
+
+	# Safe signal connection
+	if not close_btn.pressed.is_connected(_on_close_pressed):
+		close_btn.pressed.connect(_on_close_pressed)
+
+func _on_close_pressed() -> void:
+	tip_panel.hide()
+
+func show_prompt(text: String) -> void:
+	prompt_label.text = text
+	prompt_panel.show()
+
+func hide_prompt() -> void:
+	prompt_panel.hide()
+
+func show_tip_card(title: String, body: String) -> void:
+	tip_title.text = title
+	tip_body.text = body
+	tip_panel.show()
+
+func show_level_complete() -> void:
+	prompt_panel.hide()
+	tip_panel.hide()
+	complete_panel.show()
