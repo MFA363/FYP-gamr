@@ -1,0 +1,157 @@
+extends Node2D
+
+# ==============================================================================
+#  LEVEL 1 — Tutorial level
+#  Room-by-room progression. Camera slides between rooms on step complete.
+# ==============================================================================
+
+const STEP_NAMES: Array[String] = [
+	"move", "jump", "run", "push", "collect", "ghost", "done"
+]
+
+const PROMPTS: Array[String] = [
+	"[A] [D] — Move left and right",
+	"[Space] — Jump over the gap",
+	"Hold [Shift] — Run through here",
+	"Push the box into the light",
+	"[E] near the glowing orb — Collect",
+	"[Q] — Ghost Mode — pass through",
+	"Find the person... reach them",
+]
+
+var step: int          = 0
+var _is_push_done: bool  = false
+var _dialog_started: bool = false
+var _camera_settling: bool = false
+var gates: Array       = []
+
+@onready var player:      CharacterBody2D = $Teal
+@onready var room_camera: Camera2D        = $RoomCamera
+@onready var tutorial_ui: Control         = $CanvasLayer/TutorialUI
+@onready var push_zone:   Area2D          = $Objects/PushZone
+@onready var npc_area:    Area2D          = $NPC/NPCArea
+@onready var npc_zone:    Node2D          = $NPC
+
+func _ready() -> void:
+	if not has_node("Gates"):
+		push_error("Level1: 'Gates' node not found.")
+		return
+
+	for gate in $Gates.get_children():
+		gates.append(gate)
+
+	if push_zone:
+		push_zone.body_entered.connect(_on_push_zone_body_entered)
+	else:
+		push_error("Level1: PushZone not found.")
+
+	if npc_area:
+		npc_area.body_entered.connect(_on_npc_reached)
+	else:
+		push_error("Level1: NPCArea not found.")
+
+	if not GameManager.fragment_collected.is_connected(_on_fragment_collected):
+		GameManager.fragment_collected.connect(_on_fragment_collected)
+
+	# Connect camera slide finished signal
+	if room_camera.has_signal("slide_finished"):
+		room_camera.slide_finished.connect(_on_camera_settled)
+
+	# Snap camera to Room 0 instantly at start — no slide
+	room_camera.snap_to_room(0)
+
+	tutorial_ui.show_prompt(PROMPTS[0])
+
+func _process(_delta: float) -> void:
+	# Do not check progress while camera is sliding
+	if _camera_settling:
+		return
+
+	if step >= STEP_NAMES.size() - 1:
+		return
+
+	var s: String  = STEP_NAMES[step]
+	var done: bool = false
+
+	match s:
+		"move", "jump", "run", "collect", "ghost":
+			done = GameManager.is_step_complete(s)
+		"push":
+			done = _is_push_done
+
+	if done:
+		_advance()
+
+func _on_push_zone_body_entered(body: Node2D) -> void:
+	if body.is_in_group("pushable"):
+		_is_push_done = true
+
+func _advance() -> void:
+	_open_gate(step)
+	_camera_settling = true
+
+	# Slide to the next room
+	room_camera.go_to_room(step + 1)
+
+	step += 1
+
+	if step == 5 and player:
+		player.unlock_ghost()
+
+func _on_camera_settled() -> void:
+	# Camera has finished sliding — show the next prompt
+	_camera_settling = false
+	if step < PROMPTS.size():
+		tutorial_ui.show_prompt(PROMPTS[step])
+
+func _open_gate(gate_index: int) -> void:
+	if gate_index >= gates.size():
+		return
+	var gate: Node = gates[gate_index]
+	var shape := gate.get_node_or_null("Shape") as CollisionShape2D
+	if shape:
+		shape.set_deferred("disabled", true)
+	else:
+		push_warning("Level1: Gate " + str(gate_index) + " missing 'Shape'")
+	var vis := gate.get_node_or_null("Visual")
+	if vis:
+		vis.hide()
+	else:
+		push_warning("Level1: Gate " + str(gate_index) + " missing 'Visual'")
+
+func _on_fragment_collected(_id: String, title: String, body: String) -> void:
+	tutorial_ui.show_tip_card(title, body)
+	GameManager.complete_tutorial_step("collect")
+
+func _on_npc_reached(body: Node2D) -> void:
+	if body.is_in_group("player") and step >= 6:
+		if not _dialog_started:
+			_dialog_started = true
+			_begin_final_encounter()
+
+func _begin_final_encounter() -> void:
+	player.freeze()
+
+	if npc_zone == null:
+		push_error("Level1: $NPC not found.")
+		_complete_level()
+		return
+
+	if not npc_zone.has_method("begin_encounter"):
+		push_error("Level1: npc_final_zone.gd not attached to NPC.")
+		_complete_level()
+		return
+
+	if not npc_zone.dialog_finished.is_connected(_complete_level):
+		npc_zone.dialog_finished.connect(_complete_level)
+
+	npc_zone.begin_encounter()
+
+func _complete_level() -> void:
+	player.unfreeze()
+	tutorial_ui.show_level_complete()
+	await get_tree().create_timer(4.0).timeout
+	if ResourceLoader.exists("res://scenes/Levels/Level2.tscn"):
+		GameManager.load_level(2)
+	else:
+		GameManager.restart_level()
