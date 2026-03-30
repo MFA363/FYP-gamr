@@ -1,0 +1,146 @@
+extends Node2D
+
+# ==============================================================================
+#  NPC FINAL ZONE
+#  Shows a simple built-in dialog if MadTalk is not ready.
+#  Plays walk-and-fade animation after dialog.
+#  Emits dialog_finished when complete — level1.gd opens the final gate.
+# ==============================================================================
+
+signal dialog_finished
+
+# The MadTalk sheet name — must match exactly what you named it
+const DIALOG_SHEET := "npc_encounter"
+
+@onready var animation_player: AnimationPlayer = $AnimationPlayer
+@onready var npc_label:        Label           = $NPCLabel
+@onready var npc_area:         Area2D          = $NPCArea
+@onready var visual:           ColorRect       = $Visual
+
+var _madtalk:      Node    = null
+var _dialog_layer: Control = null
+var _encounter_started: bool = false
+
+func _ready() -> void:
+	_madtalk      = get_tree().root.find_child("MadTalk",      true, false)
+	_dialog_layer = get_tree().root.find_child("DialogLayer",  true, false)
+
+	if _madtalk == null:
+		push_warning("NPC: MadTalk not found — will use fallback dialog.")
+	if _dialog_layer == null:
+		push_warning("NPC: DialogLayer not found — will use fallback dialog.")
+
+func begin_encounter() -> void:
+	if _encounter_started:
+		return
+	_encounter_started = true
+
+	npc_area.monitoring = false
+	npc_label.hide()
+
+	# Small pause before anything happens — feels cinematic
+	await get_tree().create_timer(0.8).timeout
+
+	if _madtalk != null and _dialog_layer != null:
+		_start_madtalk()
+	else:
+		_start_fallback_dialog()
+
+# ── MadTalk path ──────────────────────────────────────────────────────────────
+
+func _start_madtalk() -> void:
+	_dialog_layer.show()
+
+	if not _madtalk.dialog_finished.is_connected(_on_madtalk_done):
+		_madtalk.dialog_finished.connect(_on_madtalk_done)
+
+	_madtalk.start_dialog(DIALOG_SHEET, 0)
+
+func _on_madtalk_done(_sheet: String, _seq: int) -> void:
+	if _madtalk.dialog_finished.is_connected(_on_madtalk_done):
+		_madtalk.dialog_finished.disconnect(_on_madtalk_done)
+	if _dialog_layer:
+		_dialog_layer.hide()
+	_play_walk_animation()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		return
+	if event.is_action_pressed("ui_accept") and _madtalk != null:
+		if _madtalk.has_method("dialog_acknowledge"):
+			_madtalk.dialog_acknowledge()
+
+# ── Fallback dialog path (no MadTalk needed) ──────────────────────────────────
+
+var _fallback_lines: Array[String] = [
+	"A figure sits alone in the corner.",
+	"They look up as you approach — surprised.",
+	"You reach out. What does your presence say?",
+]
+var _fallback_index: int = 0
+var _fallback_panel: PanelContainer = null
+var _fallback_label: RichTextLabel  = null
+var _fallback_active: bool          = false
+
+func _start_fallback_dialog() -> void:
+	_fallback_active = true
+	_fallback_index  = 0
+
+	# Build a simple panel on the fly — no scene needed
+	_fallback_panel = PanelContainer.new()
+	_fallback_panel.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	_fallback_panel.offset_top    = -120
+	_fallback_panel.offset_bottom = -20
+	_fallback_panel.offset_left   = 40
+	_fallback_panel.offset_right  = -40
+
+	_fallback_label = RichTextLabel.new()
+	_fallback_label.bbcode_enabled  = true
+	_fallback_label.fit_content     = true
+	_fallback_label.scroll_active   = false
+	_fallback_panel.add_child(_fallback_label)
+
+	var canvas := get_tree().root.find_child("CanvasLayer", true, false)
+	if canvas:
+		canvas.add_child(_fallback_panel)
+	else:
+		get_tree().root.add_child(_fallback_panel)
+
+	_show_fallback_line()
+
+func _show_fallback_line() -> void:
+	if _fallback_index >= _fallback_lines.size():
+		_end_fallback_dialog()
+		return
+	_fallback_label.text = _fallback_lines[_fallback_index]
+
+func _end_fallback_dialog() -> void:
+	_fallback_active = false
+	if _fallback_panel:
+		_fallback_panel.queue_free()
+	_play_walk_animation()
+
+# Override unhandled input to also advance fallback dialog
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		return
+	if not _fallback_active:
+		return
+	if event.is_action_pressed("ui_accept"):
+		get_viewport().set_input_as_handled()
+		_fallback_index += 1
+		_show_fallback_line()
+
+# ── NPC walk animation ────────────────────────────────────────────────────────
+
+func _play_walk_animation() -> void:
+	if animation_player.has_animation("walk_and_fade"):
+		animation_player.play("walk_and_fade")
+		await animation_player.animation_finished
+	else:
+		# No animation — just fade out manually
+		var tw := create_tween()
+		tw.tween_property(visual, "modulate:a", 0.0, 1.5)
+		await tw.finished
+
+	dialog_finished.emit()
