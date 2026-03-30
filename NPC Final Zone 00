@@ -1,0 +1,84 @@
+extends Node2D
+
+# Sheet name must exactly match what you named it in MadTalk editor
+const DIALOG_SHEET_ID    := "npc_encounter"
+const DIALOG_SEQUENCE_ID := 0
+
+signal dialog_finished
+
+# PhantomCamera removed — using built-in Camera2D smoothing instead
+@onready var animation_player: AnimationPlayer = $AnimationPlayer
+@onready var npc_label: Label                  = $NPCLabel
+@onready var npc_area: Area2D                  = $NPCArea
+@onready var visual: ColorRect                 = $Visual
+
+var _madtalk: Node      = null
+var _dialog_layer: Control = null
+
+func _ready() -> void:
+	# Find MadTalk node — must be named exactly "MadTalk" in your scene
+	_madtalk = get_tree().root.find_child("MadTalk", true, false)
+	if _madtalk == null:
+		push_error("NPC: Cannot find 'MadTalk' node. Check it exists in CanvasLayer.")
+
+	# Find DialogLayer to show and hide during dialog
+	_dialog_layer = get_tree().root.find_child("DialogLayer", true, false)
+	if _dialog_layer == null:
+		push_error("NPC: Cannot find 'DialogLayer' node. Check it exists in CanvasLayer.")
+
+func begin_encounter() -> void:
+	npc_area.monitoring = false
+	npc_label.hide()
+	# Small pause before dialog appears — feels more natural
+	await get_tree().create_timer(0.6).timeout
+	_start_dialog()
+
+func _start_dialog() -> void:
+	if _madtalk == null or _dialog_layer == null:
+		push_error("NPC: Missing MadTalk or DialogLayer — skipping dialog.")
+		_on_dialog_complete("", 0)
+		return
+
+	# Show the dialog UI
+	_dialog_layer.show()
+
+	# Connect MadTalk's finish signal — sends sheet_name and sequence_id
+	if not _madtalk.dialog_finished.is_connected(_on_dialog_complete):
+		_madtalk.dialog_finished.connect(_on_dialog_complete)
+
+	# Start the dialog sheet
+	_madtalk.start_dialog(DIALOG_SHEET_ID, DIALOG_SEQUENCE_ID)
+
+func _unhandled_input(event: InputEvent) -> void:
+	# Ignore mouse movement — has no action data
+	if event is InputEventMouseMotion:
+		return
+
+	# FIX: use is_action_pressed not is_action_just_pressed
+	# is_action_just_pressed does not exist on InputEvent objects in Godot 4
+	if event.is_action_pressed("ui_accept"):
+		if _madtalk and _madtalk.has_method("dialog_acknowledge"):
+			_madtalk.dialog_acknowledge()
+
+# Must accept two arguments to match MadTalk's dialog_finished signal signature
+func _on_dialog_complete(_sheet_name: String, _sequence_id: int) -> void:
+	# Disconnect to prevent firing again
+	if _madtalk and _madtalk.dialog_finished.is_connected(_on_dialog_complete):
+		_madtalk.dialog_finished.disconnect(_on_dialog_complete)
+
+	# Hide dialog UI
+	if _dialog_layer:
+		_dialog_layer.hide()
+
+	# Brief pause before NPC walks away
+	await get_tree().create_timer(0.6).timeout
+	_play_npc_walk()
+
+func _play_npc_walk() -> void:
+	if animation_player.has_animation("walk_and_fade"):
+		animation_player.play("walk_and_fade")
+		await animation_player.animation_finished
+	else:
+		push_warning("NPC: Animation 'walk_and_fade' not found — skipping.")
+
+	dialog_finished.emit()
